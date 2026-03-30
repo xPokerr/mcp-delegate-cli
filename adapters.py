@@ -10,19 +10,22 @@ import asyncio
 import collections
 import json
 import logging
+import os
 import time
 
 from config import (
-    CODEX_CMD, CLAUDE_CMD, TIMEOUT, STRIP_ANSI, CODEX_JSON_MODE,
-    PROGRESS_INTERVAL, resolve_binary,
+    CODEX_CMD, CLAUDE_CMD, GEMINI_CMD, TIMEOUT, STRIP_ANSI, CODEX_JSON_MODE,
+    PROGRESS_INTERVAL, CURRENT_DELEGATE_DEPTH, resolve_binary, resolve_binary_optional,
 )
 from utils import strip_ansi
 
 logger = logging.getLogger(__name__)
 
-# Resolve binaries once at import time — fails fast if a CLI is missing
+# Resolve binaries once at import time — fails fast if a required CLI is missing
 _CODEX_BIN = resolve_binary(CODEX_CMD)
 _CLAUDE_BIN = resolve_binary(CLAUDE_CMD)
+# Gemini is optional — server starts fine without it; delegate_to_gemini will error if None
+_GEMINI_BIN: str | None = resolve_binary_optional(GEMINI_CMD)
 
 
 def _extract_text_from_line(raw: str) -> str:
@@ -182,12 +185,14 @@ async def _run_subprocess(
     interval = progress_interval if progress_interval is not None else PROGRESS_INTERVAL
 
     start = time.monotonic()
+    child_env = {**os.environ, "MCP_DELEGATE_DEPTH": str(CURRENT_DELEGATE_DEPTH + 1)}
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,
+        env=child_env,
     )
 
     stdout_lines: list[str] = []
@@ -274,6 +279,42 @@ async def run_codex(task: str, cwd: str, timeout: int | None = None, ctx=None) -
         parsed = _parse_codex_jsonl(stdout)
         if parsed:
             return parsed
+
+    return stdout.strip() or stderr.strip() or "(no output)"
+
+
+async def run_gemini(task: str, cwd: str, timeout: int | None = None, ctx=None) -> str:
+    """
+    Invoke `gemini --prompt` non-interactively with the given task.
+    Returns cleaned output text. Raises RuntimeError or TimeoutError on failure.
+
+    # ADAPTER NOTE: If your Gemini CLI version uses different flags, edit here.
+    # Current flags:
+    #   --prompt         non-interactive (headless) mode
+    #   --yolo           auto-approve all tool actions (no confirmation prompts)
+    #   --output-format  text output (plain text response)
+    """
+    if _GEMINI_BIN is None:
+        raise FileNotFoundError(
+            f"Gemini CLI '{GEMINI_CMD}' not found in PATH. "
+            "Install it or set GEMINI_CMD to the correct path."
+        )
+    cmd = [
+        _GEMINI_BIN,
+        "--prompt", task,
+        "--yolo",
+        "--output-format", "text",
+    ]
+
+    logger.info("delegate_to_gemini task=%r timeout=%s", task[:80], timeout or TIMEOUT)
+    stdout, stderr, rc = await _run_subprocess(
+        cmd, cwd, timeout=timeout,
+        report_progress=ctx.report_progress if ctx else None,
+    )
+
+    if rc != 0:
+        detail = stderr.strip() or stdout.strip() or f"exit code {rc}"
+        raise RuntimeError(f"gemini exit code {rc}: {detail}")
 
     return stdout.strip() or stderr.strip() or "(no output)"
 

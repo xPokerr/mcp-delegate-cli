@@ -3,7 +3,7 @@ import pytest
 
 
 def test_defaults_without_env(monkeypatch):
-    for key in ["CODEX_CMD", "CLAUDE_CMD", "DELEGATE_TIMEOUT_SECONDS",
+    for key in ["CODEX_CMD", "CLAUDE_CMD", "GEMINI_CMD", "DELEGATE_TIMEOUT_SECONDS",
                 "DELEGATE_MAX_TASK_CHARS", "STRIP_ANSI", "CODEX_JSON_MODE"]:
         monkeypatch.delenv(key, raising=False)
 
@@ -12,6 +12,7 @@ def test_defaults_without_env(monkeypatch):
 
     assert config.CODEX_CMD == "codex"
     assert config.CLAUDE_CMD == "claude"
+    assert config.GEMINI_CMD == "gemini"
     assert config.TIMEOUT == 300
     assert config.MAX_TASK_CHARS == 12000
     assert config.STRIP_ANSI is True
@@ -109,3 +110,73 @@ def test_history_summary_chars_override(monkeypatch):
     import config
     importlib.reload(config)
     assert config.HISTORY_SUMMARY_CHARS == 200
+
+
+def test_gemini_cmd_default(monkeypatch):
+    monkeypatch.delenv("GEMINI_CMD", raising=False)
+    import config
+    importlib.reload(config)
+    assert config.GEMINI_CMD == "gemini"
+
+
+def test_gemini_cmd_override(monkeypatch):
+    monkeypatch.setenv("GEMINI_CMD", "/usr/local/bin/gemini")
+    import config
+    importlib.reload(config)
+    assert config.GEMINI_CMD == "/usr/local/bin/gemini"
+
+
+def test_max_delegate_depth_default(monkeypatch):
+    monkeypatch.delenv("MAX_DELEGATE_DEPTH", raising=False)
+    import config
+    importlib.reload(config)
+    assert config.MAX_DELEGATE_DEPTH == 1
+
+
+def test_max_delegate_depth_override(monkeypatch):
+    monkeypatch.setenv("MAX_DELEGATE_DEPTH", "2")
+    import config
+    importlib.reload(config)
+    assert config.MAX_DELEGATE_DEPTH == 2
+
+
+def test_disabled_delegates_default(monkeypatch):
+    monkeypatch.delenv("DISABLED_DELEGATES", raising=False)
+    import config
+    importlib.reload(config)
+    assert config.DISABLED_DELEGATES == set()
+
+
+def test_disabled_delegates_single(monkeypatch):
+    monkeypatch.setenv("DISABLED_DELEGATES", "gemini")
+    import config
+    importlib.reload(config)
+    assert config.DISABLED_DELEGATES == {"gemini"}
+
+
+def test_disabled_delegates_multiple(monkeypatch):
+    monkeypatch.setenv("DISABLED_DELEGATES", "gemini,claude")
+    import config
+    importlib.reload(config)
+    assert config.DISABLED_DELEGATES == {"gemini", "claude"}
+
+
+def test_disabled_delegates_strips_whitespace(monkeypatch):
+    monkeypatch.setenv("DISABLED_DELEGATES", " gemini , claude ")
+    import config
+    importlib.reload(config)
+    assert config.DISABLED_DELEGATES == {"gemini", "claude"}
+
+
+def test_current_delegate_depth_default(monkeypatch):
+    monkeypatch.delenv("MCP_DELEGATE_DEPTH", raising=False)
+    import config
+    importlib.reload(config)
+    assert config.CURRENT_DELEGATE_DEPTH == 0
+
+
+def test_current_delegate_depth_override(monkeypatch):
+    monkeypatch.setenv("MCP_DELEGATE_DEPTH", "1")
+    import config
+    importlib.reload(config)
+    assert config.CURRENT_DELEGATE_DEPTH == 1

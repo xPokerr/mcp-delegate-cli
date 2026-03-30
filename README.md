@@ -1,6 +1,6 @@
 # mcp-delegate-cli
 
-> An MCP server that lets your AI orchestrator delegate tasks to locally installed **Codex** and **Claude** CLIs — using your existing subscriptions, no API keys needed.
+> An MCP server that lets your AI orchestrator delegate tasks to locally installed **Codex**, **Claude**, and **Gemini** CLIs — using your existing subscriptions, no API keys needed.
 
 ---
 
@@ -28,10 +28,11 @@ The delegated CLI receives **only** the task string — no conversation history,
 ## Tools
 
 | Tool | Description |
-|------|-------------|
+|------|-----------|
 | `prepare_task(action, target, context, output_format)` | Build a compact, structured task string. Automatically offloads large context blocks to a temp file. Returns a `SUGGESTED_TIMEOUT` value. |
 | `delegate_to_codex(task, timeout_seconds)` | Forward `task` to `codex exec`. |
 | `delegate_to_claude(task, timeout_seconds)` | Forward `task` to `claude --print`. |
+| `delegate_to_gemini(task, timeout_seconds)` | Forward `task` to `gemini --prompt`. |
 | `get_history(delegate, last_n)` | Retrieve the last N recorded interactions with a delegate. Useful for passing prior context into a new call. |
 
 ### Typical orchestrator flow
@@ -67,6 +68,7 @@ History is saved to `.mcp_history/codex.jsonl` and `.mcp_history/claude.jsonl` i
 - Python 3.11+
 - [`codex`](https://github.com/openai/codex) CLI installed and authenticated
 - [`claude`](https://docs.anthropic.com/en/docs/claude-code) CLI installed and authenticated
+- [`gemini`](https://github.com/google-gemini/gemini-cli) CLI installed and authenticated *(optional — only needed for `delegate_to_gemini`)*
 
 ---
 
@@ -89,6 +91,7 @@ All settings are optional — defaults work out of the box.
 |---|---|---|
 | `CODEX_CMD` | `codex` | Path or name of the Codex binary |
 | `CLAUDE_CMD` | `claude` | Path or name of the Claude binary |
+| `GEMINI_CMD` | `gemini` | Path or name of the Gemini CLI binary |
 | `DELEGATE_TIMEOUT_SECONDS` | `300` | Default max seconds per delegated call |
 | `DELEGATE_MAX_TASK_CHARS` | `12000` | Max task string length |
 | `STRIP_ANSI` | `true` | Strip ANSI codes from CLI output |
@@ -99,6 +102,8 @@ All settings are optional — defaults work out of the box.
 | `HISTORY_DIR_NAME` | `.mcp_history` | Subdirectory for interaction history files |
 | `HISTORY_FOOTER_ENTRIES` | `2` | How many previous interactions to show in the footer |
 | `HISTORY_SUMMARY_CHARS` | `80` | Max chars per entry in the history footer |
+| `MAX_DELEGATE_DEPTH` | `1` | Max delegate chain depth. `1` means subprocesses cannot re-delegate (prevents loops) |
+| `DISABLED_DELEGATES` | `` | Comma-separated delegates to disable. Set to your orchestrator name to prevent self-calls (e.g. `gemini`) |
 
 ---
 
@@ -112,13 +117,16 @@ Add the server to Gemini's global MCP config at `~/.gemini/settings.json`:
     "delegate-cli": {
       "command": "python3.11",
       "args": ["/absolute/path/to/mcp-delegate-cli/server.py"],
-      "cwd": "/the/project/directory/where/gemini/is/working"
+      "cwd": "/the/project/directory/where/gemini/is/working",
+      "env": { "DISABLED_DELEGATES": "gemini" }
     }
   }
 }
 ```
 
 > The `cwd` field sets the working directory for the server process. All delegated CLI calls run in that directory, so set it to wherever your project lives.
+>
+> `DISABLED_DELEGATES=gemini` prevents Gemini from accidentally calling `delegate_to_gemini` on itself.
 
 The tools are available in every new Gemini session automatically. For an existing session, restart or use `/resume` to pick them up.
 
@@ -133,11 +141,14 @@ Create or edit `.mcp.json` in your project's working directory:
   "mcpServers": {
     "delegate-cli": {
       "command": "python3.11",
-      "args": ["/absolute/path/to/mcp-delegate-cli/server.py"]
+      "args": ["/absolute/path/to/mcp-delegate-cli/server.py"],
+      "env": { "DISABLED_DELEGATES": "claude" }
     }
   }
 }
 ```
+
+> `DISABLED_DELEGATES=claude` prevents Claude from calling `delegate_to_claude` on itself.
 
 ---
 
@@ -147,7 +158,7 @@ Create or edit `.mcp.json` in your project's working directory:
 python3.11 -m pytest tests/ -v
 ```
 
-53 tests covering config, utils (history, formatting, task building), and adapter behavior (streaming, progress, parsers, timeout).
+68 tests covering config, utils (history, formatting, task building), and adapter behavior (streaming, progress, parsers, timeout, depth protection).
 
 ---
 
@@ -155,7 +166,7 @@ python3.11 -m pytest tests/ -v
 
 ```
 mcp-delegate-cli/
-├── server.py          # FastMCP app — defines all 4 MCP tools
+├── server.py          # FastMCP app — defines all 5 MCP tools
 ├── adapters.py        # subprocess logic, streaming, CLI parsers
 ├── config.py          # env-var config with defaults
 ├── utils.py           # formatting, task building, history I/O
@@ -171,7 +182,7 @@ mcp-delegate-cli/
 
 ## Security note
 
-`claude --dangerously-skip-permissions` bypasses all tool permission prompts. Only run this server in trusted directories on your own machine. Never expose it over a network.
+`claude --dangerously-skip-permissions` and `gemini --yolo` bypass all tool permission prompts. Only run this server in trusted directories on your own machine. Never expose it over a network.
 
 ---
 

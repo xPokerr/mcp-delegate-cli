@@ -12,10 +12,11 @@ import time
 
 from mcp.server.fastmcp import FastMCP, Context
 
-from adapters import run_codex, run_claude
+from adapters import run_codex, run_claude, run_gemini
 from config import (
     MAX_TASK_CHARS, TASK_CONTEXT_THRESHOLD_CHARS, TMP_DIR_NAME, TIMEOUT,
     HISTORY_DIR_NAME, HISTORY_FOOTER_ENTRIES, HISTORY_SUMMARY_CHARS,
+    MAX_DELEGATE_DEPTH, CURRENT_DELEGATE_DEPTH, DISABLED_DELEGATES,
 )
 from utils import (
     format_response, format_error,
@@ -35,6 +36,29 @@ _WORKDIR = os.getcwd()
 cleanup_old_tmp_files(_WORKDIR, TMP_DIR_NAME, max_age_seconds=TIMEOUT * 2)
 
 mcp = FastMCP("mcp-delegate-cli")
+
+
+def _check_delegate(label: str, name: str) -> str | None:
+    """Return an error string if delegation should be blocked, else None.
+
+    Two independent guards:
+    - DISABLED_DELEGATES: prevents an orchestrator from calling its own delegate
+      (e.g. Gemini configured with DISABLED_DELEGATES=gemini cannot call delegate_to_gemini)
+    - MAX_DELEGATE_DEPTH: prevents subprocess chains from re-delegating further
+      (at depth >= MAX_DELEGATE_DEPTH all delegate tools are blocked)
+    """
+    if name in DISABLED_DELEGATES:
+        return (
+            f"[{label}] Delegation to '{name}' is disabled for this instance "
+            f"(DISABLED_DELEGATES={','.join(sorted(DISABLED_DELEGATES))})."
+        )
+    if CURRENT_DELEGATE_DEPTH >= MAX_DELEGATE_DEPTH:
+        return (
+            f"[{label}] Delegation blocked: already at depth {CURRENT_DELEGATE_DEPTH} "
+            f"(MAX_DELEGATE_DEPTH={MAX_DELEGATE_DEPTH}). "
+            "Delegates cannot recursively delegate."
+        )
+    return None
 
 
 def _validate_task(task: str, label: str) -> str | None:
@@ -137,8 +161,8 @@ def get_history(delegate: str, last_n: int = 5) -> str:
         Formatted string with full task + response + timestamp for each entry,
         or "(no history)" if no interactions have been recorded yet.
     """
-    if delegate not in ("codex", "claude"):
-        return f'[get_history] Unknown delegate "{delegate}". Use "codex" or "claude".'
+    if delegate not in ("codex", "claude", "gemini"):
+        return f'[get_history] Unknown delegate "{delegate}". Use "codex", "claude", or "gemini".'
     entries = load_history(_WORKDIR, HISTORY_DIR_NAME, delegate, last_n)
     return format_history_full(entries)
 
@@ -162,7 +186,7 @@ async def delegate_to_codex(task: str, timeout_seconds: int = 0, ctx: Context = 
     Returns:
         Formatted string with [model], [status], and [response] or [error] sections.
     """
-    error = _validate_task(task, "delegate_to_codex")
+    error = _check_delegate("delegate_to_codex", "codex") or _validate_task(task, "delegate_to_codex")
     if error:
         return format_error("codex", "error", error)
 
@@ -202,7 +226,7 @@ async def delegate_to_claude(task: str, timeout_seconds: int = 0, ctx: Context =
     Returns:
         Formatted string with [model], [status], and [response] or [error] sections.
     """
-    error = _validate_task(task, "delegate_to_claude")
+    error = _check_delegate("delegate_to_claude", "claude") or _validate_task(task, "delegate_to_claude")
     if error:
         return format_error("claude", "error", error)
 
@@ -221,6 +245,46 @@ async def delegate_to_claude(task: str, timeout_seconds: int = 0, ctx: Context =
         return format_error("claude", "error", str(e))
     except FileNotFoundError as e:
         return format_error("claude", "error", f"CLI not found: {e}")
+
+
+@mcp.tool()
+async def delegate_to_gemini(task: str, timeout_seconds: int = 0, ctx: Context = None) -> str:
+    """
+    Delegate a task to the locally installed Gemini CLI (gemini --prompt).
+
+    IMPORTANT: This tool forwards ONLY the `task` argument to Gemini.
+    It does NOT receive the user's conversation history, reasoning, or metadata.
+    The caller must compose a self-contained, complete task string.
+
+    Args:
+        task:            A complete, standalone instruction for Gemini to execute.
+                         Must be non-empty and under DELEGATE_MAX_TASK_CHARS characters.
+        timeout_seconds: Override the default timeout for this call only.
+                         Use for long-running tasks (e.g. 600 for analysis, 900 for audits).
+                         0 means use the global DELEGATE_TIMEOUT_SECONDS default.
+
+    Returns:
+        Formatted string with [model], [status], and [response] or [error] sections.
+    """
+    error = _check_delegate("delegate_to_gemini", "gemini") or _validate_task(task, "delegate_to_gemini")
+    if error:
+        return format_error("gemini", "error", error)
+
+    try:
+        previous = load_history(_WORKDIR, HISTORY_DIR_NAME, "gemini", HISTORY_FOOTER_ENTRIES)
+        start = time.monotonic()
+        result = await run_gemini(task, _WORKDIR, timeout=timeout_seconds or None, ctx=ctx)
+        duration = time.monotonic() - start
+        save_history_entry(_WORKDIR, HISTORY_DIR_NAME, "gemini", task, result, duration)
+        response = format_response("gemini", "success", result)
+        footer = format_history_footer("gemini", previous, HISTORY_SUMMARY_CHARS)
+        return response + footer
+    except TimeoutError as e:
+        return format_error("gemini", "timeout", str(e))
+    except RuntimeError as e:
+        return format_error("gemini", "error", str(e))
+    except FileNotFoundError as e:
+        return format_error("gemini", "error", f"CLI not found: {e}")
 
 
 if __name__ == "__main__":

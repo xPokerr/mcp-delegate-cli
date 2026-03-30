@@ -1,7 +1,7 @@
 import asyncio
 import json
 import pytest
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import AsyncMock, patch, MagicMock, call
 
 
 def make_process(stdout: bytes, stderr: bytes = b"", returncode: int = 0):
@@ -143,6 +143,7 @@ async def test_run_codex_nonzero_exit():
 
 @pytest.mark.asyncio
 async def test_run_claude_success_stream_json():
+    # Primary format: JSONL events, one per line (--output-format stream-json)
     payload = (
         b'{"type":"system","subtype":"init","session_id":"abc"}\n'
         b'{"type":"assistant","message":{"content":[{"type":"text","text":"thinking..."}]}}\n'
@@ -157,6 +158,7 @@ async def test_run_claude_success_stream_json():
 
 @pytest.mark.asyncio
 async def test_run_claude_fallback_json_array():
+    # Fallback: older claude --output-format json produces a JSON array
     payload = json.dumps([
         {"type": "system", "subtype": "init"},
         {"type": "assistant", "message": {"content": [{"type": "text", "text": "thinking..."}]}},
@@ -198,6 +200,7 @@ async def test_run_subprocess_sends_progress_on_slow_process():
         nonlocal call_count
         call_count += 1
         if call_count == 1:
+            # First call: slow — will be cancelled by wait_for(timeout=0.02)
             await asyncio.sleep(0.05)
             return b"unreachable\n"
         elif call_count == 2:
@@ -245,6 +248,7 @@ async def test_run_subprocess_progress_includes_snippet():
         if call_count == 1:
             return b"def hello_world():\n"
         elif call_count == 2:
+            # Slow — triggers progress with snippet from line 1
             await asyncio.sleep(0.05)
             return b"unreachable\n"
         return b""
@@ -274,6 +278,75 @@ async def test_run_subprocess_progress_includes_snippet():
 
     assert len(progress_calls) >= 1
     assert "> def hello_world():" in progress_calls[0]
+
+
+# ---- gemini ----
+
+@pytest.mark.asyncio
+async def test_run_gemini_success():
+    proc = make_process(b"Gemini response text\n")
+    with patch("adapters.asyncio.create_subprocess_exec", return_value=proc), \
+         patch("adapters._GEMINI_BIN", "/usr/bin/gemini"):
+        from adapters import run_gemini
+        result = await run_gemini("do something", "/tmp")
+    assert "Gemini response text" in result
+
+
+@pytest.mark.asyncio
+async def test_run_gemini_not_installed():
+    with patch("adapters._GEMINI_BIN", None):
+        from adapters import run_gemini
+        with pytest.raises(FileNotFoundError, match="not found in PATH"):
+            await run_gemini("do something", "/tmp")
+
+
+@pytest.mark.asyncio
+async def test_run_gemini_nonzero_exit():
+    proc = make_process(b"", b"auth error", returncode=1)
+    with patch("adapters.asyncio.create_subprocess_exec", return_value=proc), \
+         patch("adapters._GEMINI_BIN", "/usr/bin/gemini"):
+        from adapters import run_gemini
+        with pytest.raises(RuntimeError, match="exit code 1"):
+            await run_gemini("do something", "/tmp")
+
+
+# ---- depth env injection ----
+
+@pytest.mark.asyncio
+async def test_run_subprocess_injects_depth_env():
+    """_run_subprocess passes MCP_DELEGATE_DEPTH+1 to the child process env."""
+    proc = make_process(b"output\n")
+    captured_kwargs = {}
+
+    async def fake_exec(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return proc
+
+    with patch("adapters.asyncio.create_subprocess_exec", side_effect=fake_exec), \
+         patch("adapters.CURRENT_DELEGATE_DEPTH", 0):
+        from adapters import _run_subprocess
+        await _run_subprocess(["echo", "hi"], "/tmp", timeout=10)
+
+    assert "env" in captured_kwargs
+    assert captured_kwargs["env"]["MCP_DELEGATE_DEPTH"] == "1"
+
+
+@pytest.mark.asyncio
+async def test_run_subprocess_depth_increments():
+    """Depth in child env is always CURRENT_DELEGATE_DEPTH + 1."""
+    proc = make_process(b"output\n")
+    captured_kwargs = {}
+
+    async def fake_exec(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return proc
+
+    with patch("adapters.asyncio.create_subprocess_exec", side_effect=fake_exec), \
+         patch("adapters.CURRENT_DELEGATE_DEPTH", 2):
+        from adapters import _run_subprocess
+        await _run_subprocess(["echo", "hi"], "/tmp", timeout=10)
+
+    assert captured_kwargs["env"]["MCP_DELEGATE_DEPTH"] == "3"
 
 
 @pytest.mark.asyncio
