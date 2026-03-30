@@ -286,6 +286,7 @@ async def run_claude(task: str, cwd: str, timeout: int | None = None, ctx=None) 
     # ADAPTER NOTE: If your Claude CLI version uses different flags, edit here.
     # Current flags:
     #   --print                         non-interactive mode
+    #   --verbose                       required by some versions (e.g. Windows) for stream-json
     #   --dangerously-skip-permissions  no tool permission prompts
     #   --output-format stream-json     real-time JSONL events (one per line)
     #   --no-session-persistence        don't save this session to disk
@@ -293,6 +294,7 @@ async def run_claude(task: str, cwd: str, timeout: int | None = None, ctx=None) 
     cmd = [
         _CLAUDE_BIN,
         "--print",
+        "--verbose",
         "--dangerously-skip-permissions",
         "--output-format", "stream-json",
         "--no-session-persistence",
