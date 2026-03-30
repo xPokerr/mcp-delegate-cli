@@ -1,0 +1,7 @@
+.mcp_history/
+.mcp_tmp/
+.env
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
