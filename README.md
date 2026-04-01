@@ -84,6 +84,81 @@ History is saved under `.mcp_history/<delegate>.jsonl` inside the effective work
 
 ---
 
+## Quickstart
+
+If you just want to install the server and make it work, do this:
+
+### 1. Install the server
+
+With `pipx`:
+
+```bash
+pipx install git+https://github.com/xPokerr/mcp-delegate-cli.git
+```
+
+Or with `uv`:
+
+```bash
+uv tool install git+https://github.com/xPokerr/mcp-delegate-cli.git
+```
+
+### 2. Add it to your MCP client
+
+Gemini CLI:
+
+```json
+{
+  "mcpServers": {
+    "delegate-cli": {
+      "command": "mcp-delegate-cli",
+      "env": { "DISABLED_DELEGATES": "gemini" }
+    }
+  }
+}
+```
+
+Claude Code:
+
+```json
+{
+  "mcpServers": {
+    "delegate-cli": {
+      "command": "mcp-delegate-cli",
+      "env": { "DISABLED_DELEGATES": "claude" }
+    }
+  }
+}
+```
+
+Windows fallback if the command is not on PATH:
+
+```json
+{
+  "mcpServers": {
+    "delegate-cli": {
+      "command": "py",
+      "args": ["-m", "mcp_delegate_cli"],
+      "env": { "DISABLED_DELEGATES": "gemini" }
+    }
+  }
+}
+```
+
+### 3. Restart your MCP client
+
+Restart Gemini or Claude Code so it picks up the new MCP server.
+
+### 4. Verify it works
+
+Call:
+
+- `list_delegates()`
+- then one of `delegate_to_codex(...)`, `delegate_to_claude(...)`, or `delegate_to_gemini(...)`
+
+If `list_delegates()` shows an installed CLI as available, the server is ready to use.
+
+---
+
 ## Installation
 
 ### Recommended: install as a tool
@@ -164,7 +239,6 @@ Add the server to Gemini's global MCP config at `~/.gemini/settings.json`:
   "mcpServers": {
     "delegate-cli": {
       "command": "mcp-delegate-cli",
-      "cwd": "/the/project/directory/where/gemini/is/working",
       "env": { "DISABLED_DELEGATES": "gemini" }
     }
   }
@@ -181,16 +255,17 @@ If `mcp-delegate-cli` is on PATH, use the same config as above. If not, use the 
     "delegate-cli": {
       "command": "py",
       "args": ["-m", "mcp_delegate_cli"],
-      "cwd": "C:\\Users\\you\\project",
       "env": { "DISABLED_DELEGATES": "gemini" }
     }
   }
 }
 ```
 
-> The `cwd` field sets the working directory for the server process. All delegated CLI calls run in that directory, so set it to wherever your project lives.
->
 > `DISABLED_DELEGATES=gemini` prevents Gemini from accidentally calling `delegate_to_gemini` on itself.
+
+`cwd` is optional. Most users should leave it out of the global config.
+
+Only set `cwd` if you want to force the server to always work inside one specific directory. If you omit it, the server uses the working directory of the MCP client process, and individual delegate calls can still pass `cwd` when needed.
 
 The tools are available in every new Gemini session automatically. For an existing session, restart or use `/resume` to pick them up.
 
@@ -231,11 +306,14 @@ If the console script is not visible on PATH, use the Python module fallback:
 
 > `DISABLED_DELEGATES=claude` prevents Claude from calling `delegate_to_claude` on itself.
 
+`cwd` is optional here as well and usually does not need to be set.
+
 ---
 
 ## Notes
 
 - Packaging is now cross-platform: `pipx`, `uv tool install`, `python -m pip install`, and `python -m mcp_delegate_cli` all work with the same codebase.
+- `cwd` is optional in MCP config. Leave it out unless you want to pin the server to a single directory.
 - Delegate binaries are resolved lazily. The server can start even if one of the CLIs is not installed yet.
 - `list_delegates()` lets the orchestrator inspect availability before trying a call.
 - Delegate calls now accept an optional `cwd` override. Relative paths are resolved from the server startup directory.
