@@ -15,17 +15,52 @@ import time
 
 from config import (
     CODEX_CMD, CLAUDE_CMD, GEMINI_CMD, TIMEOUT, STRIP_ANSI, CODEX_JSON_MODE,
-    PROGRESS_INTERVAL, CURRENT_DELEGATE_DEPTH, resolve_binary, resolve_binary_optional,
+    PROGRESS_INTERVAL, CURRENT_DELEGATE_DEPTH, DISABLED_DELEGATES, resolve_binary_optional,
 )
 from utils import strip_ansi
 
 logger = logging.getLogger(__name__)
 
-# Resolve binaries once at import time — fails fast if a required CLI is missing
-_CODEX_BIN = resolve_binary(CODEX_CMD)
-_CLAUDE_BIN = resolve_binary(CLAUDE_CMD)
-# Gemini is optional — server starts fine without it; delegate_to_gemini will error if None
-_GEMINI_BIN: str | None = resolve_binary_optional(GEMINI_CMD)
+_DELEGATE_COMMANDS = {
+    "codex": CODEX_CMD,
+    "claude": CLAUDE_CMD,
+    "gemini": GEMINI_CMD,
+}
+
+
+def _resolve_delegate_binary(name: str) -> str | None:
+    """Resolve a configured delegate binary without failing server startup."""
+    cmd = _DELEGATE_COMMANDS[name]
+    return resolve_binary_optional(cmd)
+
+
+def _require_delegate_binary(name: str) -> str:
+    """Resolve a delegate binary or raise a clear runtime error."""
+    path = _resolve_delegate_binary(name)
+    if path is None:
+        raise FileNotFoundError(
+            f"{name.capitalize()} CLI '{_DELEGATE_COMMANDS[name]}' not found in PATH. "
+            f"Install it or set {name.upper()}_CMD to the correct path."
+        )
+    return path
+
+
+def get_delegate_status(name: str) -> dict:
+    """Return availability and config status for one delegate."""
+    binary_path = _resolve_delegate_binary(name)
+    enabled = name not in DISABLED_DELEGATES
+    return {
+        "name": name,
+        "enabled": enabled,
+        "available": binary_path is not None,
+        "binary_path": binary_path,
+        "disabled_reason": None if enabled else "disabled by config",
+    }
+
+
+def get_delegate_statuses() -> list[dict]:
+    """Return status for every supported delegate."""
+    return [get_delegate_status(name) for name in ("codex", "claude", "gemini")]
 
 
 def _extract_text_from_line(raw: str) -> str:
@@ -196,19 +231,31 @@ async def _run_subprocess(
     )
 
     stdout_lines: list[str] = []
+    stderr_lines: list[str] = []
     snippet: collections.deque[str] = collections.deque(maxlen=2)
+    queue: asyncio.Queue[tuple[str, bytes | None]] = asyncio.Queue()
+
+    async def _read_stream(stream, source: str) -> None:
+        while True:
+            line = await stream.readline()
+            if not line:
+                await queue.put((source, None))
+                return
+            await queue.put((source, line))
+
+    stdout_task = asyncio.create_task(_read_stream(proc.stdout, "stdout"))
+    stderr_task = asyncio.create_task(_read_stream(proc.stderr, "stderr"))
+    eof_sources: set[str] = set()
 
     try:
-        while True:
+        while len(eof_sources) < 2:
             elapsed = time.monotonic() - start
             if elapsed >= effective_timeout:
                 proc.kill()
                 raise TimeoutError(f"Process timed out after {effective_timeout}s")
 
             try:
-                line_bytes = await asyncio.wait_for(
-                    proc.stdout.readline(), timeout=interval
-                )
+                source, line_bytes = await asyncio.wait_for(queue.get(), timeout=interval)
             except asyncio.TimeoutError:
                 elapsed = time.monotonic() - start
                 if elapsed >= effective_timeout:
@@ -225,11 +272,15 @@ async def _run_subprocess(
                     await report_progress(elapsed, effective_timeout, message=msg)
                 continue
 
-            if not line_bytes:
-                break  # EOF
+            if line_bytes is None:
+                eof_sources.add(source)
+                continue
 
             line_str = line_bytes.decode("utf-8", errors="replace")
-            stdout_lines.append(line_str)
+            if source == "stdout":
+                stdout_lines.append(line_str)
+            else:
+                stderr_lines.append(line_str)
             readable = _extract_text_from_line(line_str)
             if readable:
                 # Keep only the first line of extracted text for a compact snippet
@@ -240,13 +291,16 @@ async def _run_subprocess(
     except asyncio.CancelledError:
         proc.kill()
         raise
+    finally:
+        stdout_task.cancel()
+        stderr_task.cancel()
+        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
 
     await proc.wait()
-    stderr_bytes = await proc.stderr.read()
     elapsed = time.monotonic() - start
 
     stdout = "".join(stdout_lines)
-    stderr = stderr_bytes.decode("utf-8", errors="replace")
+    stderr = "".join(stderr_lines)
     if STRIP_ANSI:
         stdout = strip_ansi(stdout)
         stderr = strip_ansi(stderr)
@@ -260,7 +314,7 @@ async def run_codex(task: str, cwd: str, timeout: int | None = None, ctx=None) -
     Invoke `codex exec` non-interactively with the given task.
     Returns cleaned output text. Raises RuntimeError or TimeoutError on failure.
     """
-    cmd = [_CODEX_BIN, "exec", "--skip-git-repo-check"]
+    cmd = [_require_delegate_binary("codex"), "exec", "--skip-git-repo-check"]
     if CODEX_JSON_MODE:
         cmd.append("--json")
     cmd.append(task)
@@ -294,13 +348,8 @@ async def run_gemini(task: str, cwd: str, timeout: int | None = None, ctx=None) 
     #   --yolo           auto-approve all tool actions (no confirmation prompts)
     #   --output-format  text output (plain text response)
     """
-    if _GEMINI_BIN is None:
-        raise FileNotFoundError(
-            f"Gemini CLI '{GEMINI_CMD}' not found in PATH. "
-            "Install it or set GEMINI_CMD to the correct path."
-        )
     cmd = [
-        _GEMINI_BIN,
+        _require_delegate_binary("gemini"),
         "--prompt", task,
         "--yolo",
         "--output-format", "text",
@@ -333,7 +382,7 @@ async def run_claude(task: str, cwd: str, timeout: int | None = None, ctx=None) 
     #   --no-session-persistence        don't save this session to disk
     """
     cmd = [
-        _CLAUDE_BIN,
+        _require_delegate_binary("claude"),
         "--print",
         "--verbose",
         "--dangerously-skip-permissions",

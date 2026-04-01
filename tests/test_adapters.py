@@ -11,22 +11,34 @@ def make_process(stdout: bytes, stderr: bytes = b"", returncode: int = 0):
     """
     proc = MagicMock()
 
-    lines = stdout.splitlines(keepends=True)
-    lines.append(b"")  # EOF sentinel
+    stdout_lines = stdout.splitlines(keepends=True)
+    stdout_lines.append(b"")  # EOF sentinel
+    stderr_lines = stderr.splitlines(keepends=True)
+    stderr_lines.append(b"")  # EOF sentinel
 
-    call_count = 0
+    stdout_call_count = 0
+    stderr_call_count = 0
 
-    async def mock_readline():
-        nonlocal call_count
-        if call_count < len(lines):
-            result = lines[call_count]
-            call_count += 1
+    async def mock_stdout_readline():
+        nonlocal stdout_call_count
+        if stdout_call_count < len(stdout_lines):
+            result = stdout_lines[stdout_call_count]
+            stdout_call_count += 1
+            return result
+        return b""
+
+    async def mock_stderr_readline():
+        nonlocal stderr_call_count
+        if stderr_call_count < len(stderr_lines):
+            result = stderr_lines[stderr_call_count]
+            stderr_call_count += 1
             return result
         return b""
 
     proc.stdout = MagicMock()
-    proc.stdout.readline = mock_readline
+    proc.stdout.readline = mock_stdout_readline
     proc.stderr = MagicMock()
+    proc.stderr.readline = mock_stderr_readline
     proc.stderr.read = AsyncMock(return_value=stderr)
     proc.wait = AsyncMock(return_value=returncode)
     proc.returncode = returncode
@@ -100,7 +112,8 @@ def test_parse_claude_stream_json_returns_last_result():
 async def test_run_codex_success_jsonl_role_based():
     jsonl = b'{"role":"assistant","content":"hello from codex"}\n'
     proc = make_process(jsonl)
-    with patch("adapters.asyncio.create_subprocess_exec", return_value=proc):
+    with patch("adapters.asyncio.create_subprocess_exec", return_value=proc), \
+         patch("adapters._resolve_delegate_binary", return_value="/usr/bin/codex"):
         from adapters import run_codex
         result = await run_codex("do something", "/tmp")
     assert result == "hello from codex"
@@ -115,7 +128,8 @@ async def test_run_codex_success_jsonl_item_completed():
         b'{"type":"turn.completed"}\n'
     )
     proc = make_process(jsonl)
-    with patch("adapters.asyncio.create_subprocess_exec", return_value=proc):
+    with patch("adapters.asyncio.create_subprocess_exec", return_value=proc), \
+         patch("adapters._resolve_delegate_binary", return_value="/usr/bin/codex"):
         from adapters import run_codex
         result = await run_codex("do something", "/tmp")
     assert result == "def hello(): pass"
@@ -124,7 +138,8 @@ async def test_run_codex_success_jsonl_item_completed():
 @pytest.mark.asyncio
 async def test_run_codex_fallback_plain_text():
     proc = make_process(b"plain output\n")
-    with patch("adapters.asyncio.create_subprocess_exec", return_value=proc):
+    with patch("adapters.asyncio.create_subprocess_exec", return_value=proc), \
+         patch("adapters._resolve_delegate_binary", return_value="/usr/bin/codex"):
         from adapters import run_codex
         result = await run_codex("do something", "/tmp")
     assert "plain output" in result
@@ -133,7 +148,8 @@ async def test_run_codex_fallback_plain_text():
 @pytest.mark.asyncio
 async def test_run_codex_nonzero_exit():
     proc = make_process(b"", b"some error", returncode=1)
-    with patch("adapters.asyncio.create_subprocess_exec", return_value=proc):
+    with patch("adapters.asyncio.create_subprocess_exec", return_value=proc), \
+         patch("adapters._resolve_delegate_binary", return_value="/usr/bin/codex"):
         from adapters import run_codex
         with pytest.raises(RuntimeError, match="exit code 1"):
             await run_codex("do something", "/tmp")
@@ -150,7 +166,8 @@ async def test_run_claude_success_stream_json():
         b'{"type":"result","subtype":"success","result":"great answer","is_error":false}\n'
     )
     proc = make_process(payload)
-    with patch("adapters.asyncio.create_subprocess_exec", return_value=proc):
+    with patch("adapters.asyncio.create_subprocess_exec", return_value=proc), \
+         patch("adapters._resolve_delegate_binary", return_value="/usr/bin/claude"):
         from adapters import run_claude
         result = await run_claude("do something", "/tmp")
     assert result == "great answer"
@@ -165,7 +182,8 @@ async def test_run_claude_fallback_json_array():
         {"type": "result", "subtype": "success", "result": "great answer", "is_error": False},
     ]).encode() + b"\n"
     proc = make_process(payload)
-    with patch("adapters.asyncio.create_subprocess_exec", return_value=proc):
+    with patch("adapters.asyncio.create_subprocess_exec", return_value=proc), \
+         patch("adapters._resolve_delegate_binary", return_value="/usr/bin/claude"):
         from adapters import run_claude
         result = await run_claude("do something", "/tmp")
     assert result == "great answer"
@@ -174,7 +192,8 @@ async def test_run_claude_fallback_json_array():
 @pytest.mark.asyncio
 async def test_run_claude_fallback_plain():
     proc = make_process(b"plain claude output\n")
-    with patch("adapters.asyncio.create_subprocess_exec", return_value=proc):
+    with patch("adapters.asyncio.create_subprocess_exec", return_value=proc), \
+         patch("adapters._resolve_delegate_binary", return_value="/usr/bin/claude"):
         from adapters import run_claude
         result = await run_claude("do something", "/tmp")
     assert "plain claude output" in result
@@ -183,7 +202,8 @@ async def test_run_claude_fallback_plain():
 @pytest.mark.asyncio
 async def test_run_claude_nonzero_exit():
     proc = make_process(b"", b"auth error", returncode=1)
-    with patch("adapters.asyncio.create_subprocess_exec", return_value=proc):
+    with patch("adapters.asyncio.create_subprocess_exec", return_value=proc), \
+         patch("adapters._resolve_delegate_binary", return_value="/usr/bin/claude"):
         from adapters import run_claude
         with pytest.raises(RuntimeError, match="exit code 1"):
             await run_claude("do something", "/tmp")
@@ -211,6 +231,7 @@ async def test_run_subprocess_sends_progress_on_slow_process():
     proc.stdout = MagicMock()
     proc.stdout.readline = slow_readline
     proc.stderr = MagicMock()
+    proc.stderr.readline = AsyncMock(return_value=b"")
     proc.stderr.read = AsyncMock(return_value=b"")
     proc.wait = AsyncMock(return_value=0)
     proc.returncode = 0
@@ -257,6 +278,7 @@ async def test_run_subprocess_progress_includes_snippet():
     proc.stdout = MagicMock()
     proc.stdout.readline = readline_with_output
     proc.stderr = MagicMock()
+    proc.stderr.readline = AsyncMock(return_value=b"")
     proc.stderr.read = AsyncMock(return_value=b"")
     proc.wait = AsyncMock(return_value=0)
     proc.returncode = 0
@@ -280,13 +302,61 @@ async def test_run_subprocess_progress_includes_snippet():
     assert "> def hello_world():" in progress_calls[0]
 
 
+@pytest.mark.asyncio
+async def test_run_subprocess_progress_includes_stderr_snippet():
+    """Progress can surface recent stderr output when stdout is idle."""
+    call_count = 0
+
+    async def stdout_readline():
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            await asyncio.sleep(0.05)
+            return b""
+        return b""
+
+    stderr_lines = [b"warning: still working\n", b""]
+
+    async def stderr_readline():
+        if stderr_lines:
+            return stderr_lines.pop(0)
+        return b""
+
+    proc = MagicMock()
+    proc.stdout = MagicMock()
+    proc.stdout.readline = stdout_readline
+    proc.stderr = MagicMock()
+    proc.stderr.readline = stderr_readline
+    proc.stderr.read = AsyncMock(return_value=b"warning: still working\n")
+    proc.wait = AsyncMock(return_value=0)
+    proc.returncode = 0
+    proc.kill = MagicMock()
+
+    progress_calls = []
+
+    async def fake_progress(elapsed, total, message=None):
+        progress_calls.append(message)
+
+    with patch("adapters.asyncio.create_subprocess_exec", return_value=proc):
+        from adapters import _run_subprocess
+        await _run_subprocess(
+            ["echo", "hi"], "/tmp",
+            timeout=10,
+            progress_interval=0.02,
+            report_progress=fake_progress,
+        )
+
+    assert len(progress_calls) >= 1
+    assert "> warning: still working" in progress_calls[0]
+
+
 # ---- gemini ----
 
 @pytest.mark.asyncio
 async def test_run_gemini_success():
     proc = make_process(b"Gemini response text\n")
     with patch("adapters.asyncio.create_subprocess_exec", return_value=proc), \
-         patch("adapters._GEMINI_BIN", "/usr/bin/gemini"):
+         patch("adapters._resolve_delegate_binary", return_value="/usr/bin/gemini"):
         from adapters import run_gemini
         result = await run_gemini("do something", "/tmp")
     assert "Gemini response text" in result
@@ -294,7 +364,7 @@ async def test_run_gemini_success():
 
 @pytest.mark.asyncio
 async def test_run_gemini_not_installed():
-    with patch("adapters._GEMINI_BIN", None):
+    with patch("adapters._resolve_delegate_binary", return_value=None):
         from adapters import run_gemini
         with pytest.raises(FileNotFoundError, match="not found in PATH"):
             await run_gemini("do something", "/tmp")
@@ -304,7 +374,7 @@ async def test_run_gemini_not_installed():
 async def test_run_gemini_nonzero_exit():
     proc = make_process(b"", b"auth error", returncode=1)
     with patch("adapters.asyncio.create_subprocess_exec", return_value=proc), \
-         patch("adapters._GEMINI_BIN", "/usr/bin/gemini"):
+         patch("adapters._resolve_delegate_binary", return_value="/usr/bin/gemini"):
         from adapters import run_gemini
         with pytest.raises(RuntimeError, match="exit code 1"):
             await run_gemini("do something", "/tmp")
@@ -360,6 +430,7 @@ async def test_run_subprocess_timeout_with_progress():
     proc.stdout = MagicMock()
     proc.stdout.readline = never_readline
     proc.stderr = MagicMock()
+    proc.stderr.readline = AsyncMock(return_value=b"")
     proc.stderr.read = AsyncMock(return_value=b"")
     proc.wait = AsyncMock(return_value=0)
     proc.returncode = 0

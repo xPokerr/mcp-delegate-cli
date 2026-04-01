@@ -1,27 +1,34 @@
 """
-MCP server that exposes delegate_to_codex and delegate_to_claude tools.
+MCP server for delegating tasks to local Codex, Claude, and Gemini CLIs.
 
 Launch with:
-    python server.py
+    mcp-delegate-cli
+or:
+    python -m mcp_delegate_cli
 
 The server communicates over stdio (standard MCP transport).
 """
 import logging
 import os
 import time
+from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP, Context
 
-from adapters import run_codex, run_claude, run_gemini
+from adapters import (
+    get_delegate_statuses,
+    run_codex,
+    run_claude,
+    run_gemini,
+)
 from config import (
     MAX_TASK_CHARS, TASK_CONTEXT_THRESHOLD_CHARS, TMP_DIR_NAME, TIMEOUT,
     HISTORY_DIR_NAME, HISTORY_FOOTER_ENTRIES, HISTORY_SUMMARY_CHARS,
     MAX_DELEGATE_DEPTH, CURRENT_DELEGATE_DEPTH, DISABLED_DELEGATES,
 )
 from utils import (
-    format_response, format_error,
     build_task_string, write_context_file, cleanup_old_tmp_files,
-    save_history_entry, load_history, format_history_footer, format_history_full,
+    save_history_entry, load_history, format_history_full, build_history_preview,
 )
 
 logging.basicConfig(
@@ -90,13 +97,57 @@ def _estimate_timeout(context: str, target: str) -> int:
     return 300
 
 
+def _resolve_workdir(cwd: str = "") -> str:
+    """Resolve an optional cwd override relative to the server workdir."""
+    if not cwd or not cwd.strip():
+        return _WORKDIR
+
+    candidate = Path(cwd.strip())
+    if not candidate.is_absolute():
+        candidate = Path(_WORKDIR) / candidate
+    candidate = candidate.resolve()
+    if not candidate.exists():
+        raise ValueError(f"cwd does not exist: {candidate}")
+    if not candidate.is_dir():
+        raise ValueError(f"cwd is not a directory: {candidate}")
+    return str(candidate)
+
+
+def _build_delegate_success_payload(
+    model: str,
+    response: str,
+    previous: list[dict],
+    duration_s: float,
+    cwd: str,
+) -> dict:
+    return {
+        "model": model,
+        "status": "success",
+        "response": response,
+        "history_preview": build_history_preview(previous, HISTORY_SUMMARY_CHARS),
+        "duration_seconds": round(duration_s, 1),
+        "cwd": cwd,
+    }
+
+
+def _build_delegate_error_payload(model: str, status: str, error: str, cwd: str | None = None) -> dict:
+    payload = {
+        "model": model,
+        "status": status,
+        "error": error,
+    }
+    if cwd is not None:
+        payload["cwd"] = cwd
+    return payload
+
+
 @mcp.tool()
 def prepare_task(
     action: str,
     target: str = "",
     context: str = "",
     output_format: str = "",
-) -> str:
+) -> dict:
     """
     Build a compact, structured task string to pass to delegate_to_codex or delegate_to_claude.
 
@@ -123,14 +174,19 @@ def prepare_task(
         Always pass SUGGESTED_TIMEOUT as timeout_seconds when calling delegate tools.
     """
     if not action or not action.strip():
-        return "[prepare_task] action cannot be empty."
+        return {
+            "status": "error",
+            "error": "[prepare_task] action cannot be empty.",
+        }
 
     context_is_file = False
+    context_file = None
     context_value = context.strip() if context else None
 
     if context_value and len(context_value) > TASK_CONTEXT_THRESHOLD_CHARS:
         context_value = write_context_file(context_value, _WORKDIR, TMP_DIR_NAME)
         context_is_file = True
+        context_file = context_value
 
     task_str = build_task_string(
         action=action.strip(),
@@ -141,11 +197,16 @@ def prepare_task(
     )
 
     suggested_timeout = _estimate_timeout(context or "", target or "")
-    return task_str + f"\nSUGGESTED_TIMEOUT: {suggested_timeout}"
+    return {
+        "status": "success",
+        "task": task_str,
+        "suggested_timeout_seconds": suggested_timeout,
+        "context_file": context_file,
+    }
 
 
 @mcp.tool()
-def get_history(delegate: str, last_n: int = 5) -> str:
+def get_history(delegate: str, last_n: int = 5, cwd: str = "") -> dict:
     """
     Retrieve the last N recorded interactions with a delegate.
 
@@ -162,13 +223,47 @@ def get_history(delegate: str, last_n: int = 5) -> str:
         or "(no history)" if no interactions have been recorded yet.
     """
     if delegate not in ("codex", "claude", "gemini"):
-        return f'[get_history] Unknown delegate "{delegate}". Use "codex", "claude", or "gemini".'
-    entries = load_history(_WORKDIR, HISTORY_DIR_NAME, delegate, last_n)
-    return format_history_full(entries)
+        return {
+            "status": "error",
+            "error": f'[get_history] Unknown delegate "{delegate}". Use "codex", "claude", or "gemini".',
+        }
+    try:
+        resolved_cwd = _resolve_workdir(cwd)
+    except ValueError as e:
+        return {
+            "status": "error",
+            "error": str(e),
+        }
+
+    entries = load_history(resolved_cwd, HISTORY_DIR_NAME, delegate, last_n)
+    return {
+        "status": "success",
+        "delegate": delegate,
+        "count": len(entries),
+        "entries": entries,
+        "formatted": format_history_full(entries),
+        "cwd": resolved_cwd,
+    }
 
 
 @mcp.tool()
-async def delegate_to_codex(task: str, timeout_seconds: int = 0, ctx: Context = None) -> str:
+def list_delegates() -> dict:
+    """Return availability and configuration status for each supported delegate."""
+    return {
+        "status": "success",
+        "delegates": get_delegate_statuses(),
+        "current_delegate_depth": CURRENT_DELEGATE_DEPTH,
+        "max_delegate_depth": MAX_DELEGATE_DEPTH,
+    }
+
+
+@mcp.tool()
+async def delegate_to_codex(
+    task: str,
+    timeout_seconds: int = 0,
+    cwd: str = "",
+    ctx: Context = None,
+) -> dict:
     """
     Delegate a task to the locally installed Codex CLI.
 
@@ -188,27 +283,33 @@ async def delegate_to_codex(task: str, timeout_seconds: int = 0, ctx: Context = 
     """
     error = _check_delegate("delegate_to_codex", "codex") or _validate_task(task, "delegate_to_codex")
     if error:
-        return format_error("codex", "error", error)
+        return _build_delegate_error_payload("codex", "error", error)
 
     try:
-        previous = load_history(_WORKDIR, HISTORY_DIR_NAME, "codex", HISTORY_FOOTER_ENTRIES)
+        resolved_cwd = _resolve_workdir(cwd)
+        previous = load_history(resolved_cwd, HISTORY_DIR_NAME, "codex", HISTORY_FOOTER_ENTRIES)
         start = time.monotonic()
-        result = await run_codex(task, _WORKDIR, timeout=timeout_seconds or None, ctx=ctx)
+        result = await run_codex(task, resolved_cwd, timeout=timeout_seconds or None, ctx=ctx)
         duration = time.monotonic() - start
-        save_history_entry(_WORKDIR, HISTORY_DIR_NAME, "codex", task, result, duration)
-        response = format_response("codex", "success", result)
-        footer = format_history_footer("codex", previous, HISTORY_SUMMARY_CHARS)
-        return response + footer
+        save_history_entry(resolved_cwd, HISTORY_DIR_NAME, "codex", task, result, duration)
+        return _build_delegate_success_payload("codex", result, previous, duration, resolved_cwd)
+    except ValueError as e:
+        return _build_delegate_error_payload("codex", "error", str(e))
     except TimeoutError as e:
-        return format_error("codex", "timeout", str(e))
+        return _build_delegate_error_payload("codex", "timeout", str(e), resolved_cwd)
     except RuntimeError as e:
-        return format_error("codex", "error", str(e))
+        return _build_delegate_error_payload("codex", "error", str(e), resolved_cwd)
     except FileNotFoundError as e:
-        return format_error("codex", "error", f"CLI not found: {e}")
+        return _build_delegate_error_payload("codex", "error", f"CLI not found: {e}", resolved_cwd)
 
 
 @mcp.tool()
-async def delegate_to_claude(task: str, timeout_seconds: int = 0, ctx: Context = None) -> str:
+async def delegate_to_claude(
+    task: str,
+    timeout_seconds: int = 0,
+    cwd: str = "",
+    ctx: Context = None,
+) -> dict:
     """
     Delegate a task to the locally installed Claude CLI (claude --print).
 
@@ -228,27 +329,33 @@ async def delegate_to_claude(task: str, timeout_seconds: int = 0, ctx: Context =
     """
     error = _check_delegate("delegate_to_claude", "claude") or _validate_task(task, "delegate_to_claude")
     if error:
-        return format_error("claude", "error", error)
+        return _build_delegate_error_payload("claude", "error", error)
 
     try:
-        previous = load_history(_WORKDIR, HISTORY_DIR_NAME, "claude", HISTORY_FOOTER_ENTRIES)
+        resolved_cwd = _resolve_workdir(cwd)
+        previous = load_history(resolved_cwd, HISTORY_DIR_NAME, "claude", HISTORY_FOOTER_ENTRIES)
         start = time.monotonic()
-        result = await run_claude(task, _WORKDIR, timeout=timeout_seconds or None, ctx=ctx)
+        result = await run_claude(task, resolved_cwd, timeout=timeout_seconds or None, ctx=ctx)
         duration = time.monotonic() - start
-        save_history_entry(_WORKDIR, HISTORY_DIR_NAME, "claude", task, result, duration)
-        response = format_response("claude", "success", result)
-        footer = format_history_footer("claude", previous, HISTORY_SUMMARY_CHARS)
-        return response + footer
+        save_history_entry(resolved_cwd, HISTORY_DIR_NAME, "claude", task, result, duration)
+        return _build_delegate_success_payload("claude", result, previous, duration, resolved_cwd)
+    except ValueError as e:
+        return _build_delegate_error_payload("claude", "error", str(e))
     except TimeoutError as e:
-        return format_error("claude", "timeout", str(e))
+        return _build_delegate_error_payload("claude", "timeout", str(e), resolved_cwd)
     except RuntimeError as e:
-        return format_error("claude", "error", str(e))
+        return _build_delegate_error_payload("claude", "error", str(e), resolved_cwd)
     except FileNotFoundError as e:
-        return format_error("claude", "error", f"CLI not found: {e}")
+        return _build_delegate_error_payload("claude", "error", f"CLI not found: {e}", resolved_cwd)
 
 
 @mcp.tool()
-async def delegate_to_gemini(task: str, timeout_seconds: int = 0, ctx: Context = None) -> str:
+async def delegate_to_gemini(
+    task: str,
+    timeout_seconds: int = 0,
+    cwd: str = "",
+    ctx: Context = None,
+) -> dict:
     """
     Delegate a task to the locally installed Gemini CLI (gemini --prompt).
 
@@ -268,24 +375,30 @@ async def delegate_to_gemini(task: str, timeout_seconds: int = 0, ctx: Context =
     """
     error = _check_delegate("delegate_to_gemini", "gemini") or _validate_task(task, "delegate_to_gemini")
     if error:
-        return format_error("gemini", "error", error)
+        return _build_delegate_error_payload("gemini", "error", error)
 
     try:
-        previous = load_history(_WORKDIR, HISTORY_DIR_NAME, "gemini", HISTORY_FOOTER_ENTRIES)
+        resolved_cwd = _resolve_workdir(cwd)
+        previous = load_history(resolved_cwd, HISTORY_DIR_NAME, "gemini", HISTORY_FOOTER_ENTRIES)
         start = time.monotonic()
-        result = await run_gemini(task, _WORKDIR, timeout=timeout_seconds or None, ctx=ctx)
+        result = await run_gemini(task, resolved_cwd, timeout=timeout_seconds or None, ctx=ctx)
         duration = time.monotonic() - start
-        save_history_entry(_WORKDIR, HISTORY_DIR_NAME, "gemini", task, result, duration)
-        response = format_response("gemini", "success", result)
-        footer = format_history_footer("gemini", previous, HISTORY_SUMMARY_CHARS)
-        return response + footer
+        save_history_entry(resolved_cwd, HISTORY_DIR_NAME, "gemini", task, result, duration)
+        return _build_delegate_success_payload("gemini", result, previous, duration, resolved_cwd)
+    except ValueError as e:
+        return _build_delegate_error_payload("gemini", "error", str(e))
     except TimeoutError as e:
-        return format_error("gemini", "timeout", str(e))
+        return _build_delegate_error_payload("gemini", "timeout", str(e), resolved_cwd)
     except RuntimeError as e:
-        return format_error("gemini", "error", str(e))
+        return _build_delegate_error_payload("gemini", "error", str(e), resolved_cwd)
     except FileNotFoundError as e:
-        return format_error("gemini", "error", f"CLI not found: {e}")
+        return _build_delegate_error_payload("gemini", "error", f"CLI not found: {e}", resolved_cwd)
+
+
+def main() -> None:
+    """Run the FastMCP server over stdio."""
+    mcp.run()
 
 
 if __name__ == "__main__":
-    mcp.run()
+    main()

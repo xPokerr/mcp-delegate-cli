@@ -144,6 +144,25 @@ def format_history_footer(
     return "\n".join(lines)
 
 
+def build_history_preview(entries: list[dict], summary_chars: int) -> list[dict]:
+    """Return a structured summary of previous interactions."""
+    preview = []
+    for entry in entries:
+        task = str(entry.get("task", "")).replace("\n", " ")
+        response = str(entry.get("response", "")).replace("\n", " ")
+        if len(task) > summary_chars:
+            task = task[:summary_chars] + "..."
+        if len(response) > summary_chars:
+            response = response[:summary_chars] + "..."
+        preview.append(
+            {
+                "task_summary": task,
+                "response_summary": response,
+            }
+        )
+    return preview
+
+
 def format_history_full(entries: list[dict]) -> str:
     """Build a full formatted string for the get_history tool response."""
     if not entries:

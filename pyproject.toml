@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcp-delegate-cli"
+version = "0.1.0"
+description = "MCP server for delegating tasks to local Codex, Claude, and Gemini CLIs"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "mcp>=1.26.0",
+  "python-dotenv>=1.0.0",
+]
+license = { text = "MIT" }
+authors = [
+  { name = "xPokerr" }
+]
+keywords = ["mcp", "codex", "claude", "gemini", "delegate", "cli"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
+
+[project.scripts]
+mcp-delegate-cli = "mcp_delegate_cli.__main__:main"
+
+[tool.setuptools]
+packages = ["mcp_delegate_cli"]
+py-modules = ["server", "adapters", "config", "utils"]

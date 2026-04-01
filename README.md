@@ -21,45 +21,57 @@ Orchestrator (e.g. Gemini)
     Orchestrator
 ```
 
-The delegated CLI receives **only** the task string — no conversation history, no user messages, no metadata.
+The delegated CLI receives **only** the task string you pass into the delegate tool — no conversation history, no user messages, no hidden metadata.
 
 ---
 
 ## Tools
 
 | Tool | Description |
-|------|-----------|
-| `prepare_task(action, target, context, output_format)` | Build a compact, structured task string. Automatically offloads large context blocks to a temp file. Returns a `SUGGESTED_TIMEOUT` value. |
-| `delegate_to_codex(task, timeout_seconds)` | Forward `task` to `codex exec`. |
-| `delegate_to_claude(task, timeout_seconds)` | Forward `task` to `claude --print`. |
-| `delegate_to_gemini(task, timeout_seconds)` | Forward `task` to `gemini --prompt`. |
-| `get_history(delegate, last_n)` | Retrieve the last N recorded interactions with a delegate. Useful for passing prior context into a new call. |
+|------|-------------|
+| `prepare_task(action, target, context, output_format)` | Build a compact, structured task string. Automatically offloads large context blocks to a temp file and returns a structured payload with `task` and `suggested_timeout_seconds`. |
+| `delegate_to_codex(task, timeout_seconds, cwd)` | Forward `task` to `codex exec`. Returns structured JSON-like data including `response`, `history_preview`, and effective `cwd`. |
+| `delegate_to_claude(task, timeout_seconds, cwd)` | Forward `task` to `claude --print`. |
+| `delegate_to_gemini(task, timeout_seconds, cwd)` | Forward `task` to `gemini --prompt`. |
+| `get_history(delegate, last_n)` | Retrieve structured full history for a delegate. |
+| `list_delegates()` | Report whether each delegate is enabled, available on PATH, and which binary path will be used. |
 
 ### Typical orchestrator flow
 
 ```
 1. prepare_task(action="refactor", target="src/auth.py", context="...", output_format="unified diff")
-   → returns compact task string + SUGGESTED_TIMEOUT: 300
+   → returns `{status, task, suggested_timeout_seconds, context_file}`
 
-2. delegate_to_codex(task=<above>, timeout_seconds=300)
-   → returns response + history footer showing last 2 interactions
+2. delegate_to_codex(task=<above>.task, timeout_seconds=<above>.suggested_timeout_seconds)
+   → returns `{model, status, response, history_preview, duration_seconds, cwd}`
 
 3. (optional) get_history("codex", last_n=3)
-   → returns full task + response for the last 3 calls
+   → returns `{delegate, count, entries, formatted}`
 ```
 
-### History footer
+### Structured responses
 
-Every successful delegate response includes a compact footer so the orchestrator always knows what was asked before:
+Successful delegate calls now return structured data instead of an appended text footer:
 
+```json
+{
+  "model": "codex",
+  "status": "success",
+  "response": "refactor complete",
+  "history_preview": [
+    {
+      "task_summary": "review src/auth.py",
+      "response_summary": "found 2 issues"
+    }
+  ],
+  "duration_seconds": 12.4,
+  "cwd": "/absolute/project/path"
+}
 ```
-─── History (codex, 2 previous) ───
-  1. "refactor the auth module in src/auth.py..." → "I've refactored the auth mo..."
-  2. "add unit tests for the login function..."   → "Here are the unit tests for..."
-Call get_history("codex") for full content.
-```
 
-History is saved to `.mcp_history/codex.jsonl` and `.mcp_history/claude.jsonl` in the server's working directory. It persists across restarts.
+This keeps machine-readable outputs clean, including cases like `OUTPUT: json` or `OUTPUT: unified diff only`.
+
+History is saved under `.mcp_history/<delegate>.jsonl` inside the effective working directory used for that delegate call. It persists across restarts.
 
 ---
 
@@ -74,12 +86,46 @@ History is saved to `.mcp_history/codex.jsonl` and `.mcp_history/claude.jsonl` i
 
 ## Installation
 
+### Recommended: install as a tool
+
+This is the easiest path on both macOS and Windows.
+
+With `pipx`:
+
+```bash
+pipx install git+https://github.com/xPokerr/mcp-delegate-cli.git
+```
+
+With `uv`:
+
+```bash
+uv tool install git+https://github.com/xPokerr/mcp-delegate-cli.git
+```
+
+After install, the MCP server command is simply:
+
+```bash
+mcp-delegate-cli
+```
+
+### Fallback: install from a local clone
+
 ```bash
 git clone https://github.com/xPokerr/mcp-delegate-cli.git
 cd mcp-delegate-cli
-pip install -r requirements.txt
+python -m pip install -e .
 cp .env.example .env   # optional: adjust defaults
 ```
+
+### Fallback: module entrypoint
+
+If your environment does not expose the `mcp-delegate-cli` command on PATH, you can always run:
+
+```bash
+python -m mcp_delegate_cli
+```
+
+On Windows, `py -m mcp_delegate_cli` usually works as well.
 
 ---
 
@@ -109,15 +155,33 @@ All settings are optional — defaults work out of the box.
 
 ## Connecting to Gemini CLI
 
+### macOS / Linux
+
 Add the server to Gemini's global MCP config at `~/.gemini/settings.json`:
 
 ```json
 {
   "mcpServers": {
     "delegate-cli": {
-      "command": "python3.11",
-      "args": ["/absolute/path/to/mcp-delegate-cli/server.py"],
+      "command": "mcp-delegate-cli",
       "cwd": "/the/project/directory/where/gemini/is/working",
+      "env": { "DISABLED_DELEGATES": "gemini" }
+    }
+  }
+}
+```
+
+### Windows
+
+If `mcp-delegate-cli` is on PATH, use the same config as above. If not, use the Python module fallback:
+
+```json
+{
+  "mcpServers": {
+    "delegate-cli": {
+      "command": "py",
+      "args": ["-m", "mcp_delegate_cli"],
+      "cwd": "C:\\Users\\you\\project",
       "env": { "DISABLED_DELEGATES": "gemini" }
     }
   }
@@ -134,14 +198,31 @@ The tools are available in every new Gemini session automatically. For an existi
 
 ## Connecting to Claude Code
 
+### macOS / Linux
+
 Create or edit `.mcp.json` in your project's working directory:
 
 ```json
 {
   "mcpServers": {
     "delegate-cli": {
-      "command": "python3.11",
-      "args": ["/absolute/path/to/mcp-delegate-cli/server.py"],
+      "command": "mcp-delegate-cli",
+      "env": { "DISABLED_DELEGATES": "claude" }
+    }
+  }
+}
+```
+
+### Windows
+
+If the console script is not visible on PATH, use the Python module fallback:
+
+```json
+{
+  "mcpServers": {
+    "delegate-cli": {
+      "command": "py",
+      "args": ["-m", "mcp_delegate_cli"],
       "env": { "DISABLED_DELEGATES": "claude" }
     }
   }
@@ -152,13 +233,23 @@ Create or edit `.mcp.json` in your project's working directory:
 
 ---
 
+## Notes
+
+- Packaging is now cross-platform: `pipx`, `uv tool install`, `python -m pip install`, and `python -m mcp_delegate_cli` all work with the same codebase.
+- Delegate binaries are resolved lazily. The server can start even if one of the CLIs is not installed yet.
+- `list_delegates()` lets the orchestrator inspect availability before trying a call.
+- Delegate calls now accept an optional `cwd` override. Relative paths are resolved from the server startup directory.
+- Subprocess output drains both `stdout` and `stderr` concurrently, which avoids deadlocks when a CLI emits heavy stderr output.
+
+---
+
 ## Running tests
 
 ```bash
-python3.11 -m pytest tests/ -v
+python -m pytest tests/ -v
 ```
 
-68 tests covering config, utils (history, formatting, task building), and adapter behavior (streaming, progress, parsers, timeout, depth protection).
+76 tests covering config, packaging, utils, history, and adapter behavior.
 
 ---
 
@@ -166,7 +257,9 @@ python3.11 -m pytest tests/ -v
 
 ```
 mcp-delegate-cli/
-├── server.py          # FastMCP app — defines all 5 MCP tools
+├── pyproject.toml      # package metadata + console script entrypoint
+├── mcp_delegate_cli/   # module entrypoint for `python -m mcp_delegate_cli`
+├── server.py          # FastMCP app — defines all 4 MCP tools
 ├── adapters.py        # subprocess logic, streaming, CLI parsers
 ├── config.py          # env-var config with defaults
 ├── utils.py           # formatting, task building, history I/O
@@ -182,7 +275,7 @@ mcp-delegate-cli/
 
 ## Security note
 
-`claude --dangerously-skip-permissions` and `gemini --yolo` bypass all tool permission prompts. Only run this server in trusted directories on your own machine. Never expose it over a network.
+`claude --dangerously-skip-permissions` bypasses all tool permission prompts. Only run this server in trusted directories on your own machine. Never expose it over a network.
 
 ---
 
