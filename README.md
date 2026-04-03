@@ -6,8 +6,6 @@
 
 Want to discuss the project, ask questions, or report an issue? [Join the Discord server](https://discord.gg/fQpAaQs72q)
 
-Discord: `xpokerr`
-
 ---
 
 ## What it does
